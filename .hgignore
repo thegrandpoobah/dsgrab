@@ -1,0 +1,14 @@
+syntax: glob
+Debug/*
+Release/*
+_UpgradeReport_Files/*
+UpgradeLog?.XML
+Thumbs.db
+DSGrab.ncb
+DSGrab.opensdf
+DSGrab.sdf
+DSGrab.suo
+DSGrab.vcproj.SAPPHIRE.Sahab Yazdani.user
+DSGrab.vcxproj.filters
+DSGrab.vcxproj.user
+UpgradeLog.XML
