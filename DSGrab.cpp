@@ -54,7 +54,7 @@
 #include <memory>
 
 // boost
-#include <Boost/lexical_cast.hpp>
+#include <boost/lexical_cast.hpp>
 
 typedef std::basic_string<TCHAR> tstring;
 typedef std::basic_stringstream<TCHAR> tstringstream;
@@ -68,6 +68,45 @@ typedef std::basic_stringstream<TCHAR> tstringstream;
 #endif // _UNICODE
 
 static ULONG gdiplusToken;
+
+// The following functions are defined in the DirectShow base class library.
+// They are redefined here for convenience, because many applications do not
+// need to link to the base class library.
+// These functions were copied from: http://cppxml.googlecode.com/svn-history/r16/trunk/englishplayer/EnTranscription/dshowutil.h
+// Which in turn were copied from: http://msdn.microsoft.com/en-us/library/windows/desktop/dd375432%28v=VS.85%29.aspx
+#ifndef __STREAMS__
+
+// FreeMediaType: Release the format block for a media type.
+inline void FreeMediaType(AM_MEDIA_TYPE& mt)
+{
+    if (mt.cbFormat != 0)
+    {
+        CoTaskMemFree((PVOID)mt.pbFormat);
+        mt.cbFormat = 0;
+        mt.pbFormat = NULL;
+    }
+    if (mt.pUnk != NULL)
+    {
+        // Unecessary because pUnk should not be used, but safest.
+        mt.pUnk->Release();
+        mt.pUnk = NULL;
+    }
+}
+
+// DeleteMediaType:
+// Delete a media type structure that was created on the heap, including the
+// format block)
+inline void DeleteMediaType(AM_MEDIA_TYPE *pmt)
+{
+    if (pmt != NULL)
+    {
+        FreeMediaType(*pmt); 
+        CoTaskMemFree(pmt);
+    }
+}
+
+
+#endif
 
 namespace Exception {
 	class NoSuchDevice {
@@ -166,7 +205,7 @@ void CaptureDevice::EnumerateDeviceCaps() {
 			_T( "\tBit Depth:" ) << bitDepth <<
 			std::endl;
 
-		// free media_type
+		DeleteMediaType(media_type);
 	}
 
 	streamConfig->Release();
@@ -200,7 +239,7 @@ Gdiplus::Bitmap *CaptureDevice::GetSingleSnapshot( DWORD wait /* = 0 */ ) {
 
 		hr = sampleGrabber->SetMediaType( &am );
 
-		// TODO: release sourceAM
+		DeleteMediaType(sourceAM);
 
 		streamConfig->Release();
 	} else {
