@@ -7,8 +7,3 @@ a "live cam" feed on a web site by using it in conjuction with the built in Wind
 Task Scheduler, a manipulator tool such as ImageMagik, and an FTP tool such as 
 WinSCP. It is also (probably) the least amount of code you could write to interact
 with the DirectShow APIs.
-
-## TODO
-
-* Add a YUV -> RGB colour space converter for capture devices
-  that do not expose an RGB output pin.
