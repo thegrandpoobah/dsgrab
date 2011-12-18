@@ -1,4 +1,4 @@
-// DSGrab Version 1.0.0
+// DSGrab Version 1.5.0
 
 //The MIT License
 //
@@ -23,6 +23,7 @@
 //THE SOFTWARE.
 
 // Win32
+#define NOMINMAX
 #include <windows.h>
 #include <tchar.h>
 
@@ -41,33 +42,44 @@
 #include <comutil.h>
 #include <dvdmedia.h>
 
-// GDI+
-#include <gdiplus.h>
-#include <gdipluspixelformats.h>
-
 // std c++
+#include <string>
+#include <memory>
 #include <map>
 #include <vector>
 #include <string>
 #include <iostream>
 #include <sstream>
 #include <memory>
+#include <exception>
+
+// GDI+
+using std::min;
+using std::max;
+#pragma warning(push)
+#pragma warning(disable : 4244)
+#include <gdiplus.h>
+#include <gdipluspixelformats.h>
+#pragma warning(pop)
 
 // boost
 #include <boost/lexical_cast.hpp>
+#include <boost/algorithm/string.hpp>
+#include <boost/program_options.hpp>
 
 typedef std::basic_string<TCHAR> tstring;
 typedef std::basic_stringstream<TCHAR> tstringstream;
+typedef boost::program_options::basic_command_line_parser<TCHAR> tcommand_line_parser;
 
 #ifdef _UNICODE
 #define tcout std::wcout
 #define tcerr std::wcerr
+#define tvalue boost::program_options::wvalue
 #else
 #define tcout std::cout
 #define tcerr std::cerr
+#define tvalue boost::program_options::value
 #endif // _UNICODE
-
-static ULONG gdiplusToken;
 
 // The following functions are defined in the DirectShow base class library.
 // They are redefined here for convenience, because many applications do not
@@ -105,24 +117,37 @@ inline void DeleteMediaType(AM_MEDIA_TYPE *pmt)
     }
 }
 
-
-#endif
+#endif // __STREAMS__
 
 namespace Exception {
-	class NoSuchDevice {
-	};
+	class NoSuchDevice {};
 	class COMError {
 	public:
 		COMError( HRESULT hr ) : hr(hr) {};
 		HRESULT hr;
 	};
-	class NoSuchCLSID {
-	};
+	class GdiPlusError {};
+
+	class NoSuchCLSID {};
 	class BadExtension {
 	public:
 		BadExtension( tstring extension ) : extension(extension) {};
 		tstring extension;
 	};
+
+	class CommandLineError {
+	public:
+		CommandLineError( tstring error ) : error(error) {};
+		tstring error;
+	};
+
+	class ResizeError {
+	public:
+		ResizeError( tstring error ) : error(error) {};
+		tstring error;
+	};
+
+	class SaveError {};
 }
 
 class CaptureDevice {
@@ -133,11 +158,9 @@ public:
 	CaptureDevice( IBaseFilter *f );
 	~CaptureDevice();
 
-	void EnumerateDeviceCaps( );
+	static void EnumerateCaptureDevices( std::map< tstring, std::pair< IBaseFilter *, int > > &filterMap );
 
-	static void EnumerateCaptureDevices( std::map< tstring, IBaseFilter * > &filterMap );
-
-	void SetResolution( LONG width, LONG height, WORD bitDepth = 0 );
+	void SetResolution( LONG width, LONG height );
 
 	Gdiplus::Bitmap *GetSingleSnapshot( DWORD wait = 0 );
 protected:
@@ -171,46 +194,6 @@ CaptureDevice::~CaptureDevice() {
 	if ( outputFilter!=NULL ) outputFilter->Release();
 }
 
-void CaptureDevice::EnumerateDeviceCaps() {
-	HRESULT hr;
-
-	IAMStreamConfig *streamConfig;
-	int capCount, capSize;
-	VIDEO_STREAM_CONFIG_CAPS caps;
-	AM_MEDIA_TYPE *media_type;
-
-	hr = videoOutputPin->QueryInterface( IID_IAMStreamConfig, reinterpret_cast< LPVOID * >( &streamConfig ) );
-	if ( FAILED( hr ) ) {
-		throw Exception::COMError( hr );
-	}
-	hr = streamConfig->GetNumberOfCapabilities( &capCount, &capSize );
-
-	for ( int i=0;i<capCount;i++ ) {
-		streamConfig->GetStreamCaps( i, &media_type, reinterpret_cast< BYTE * >( &caps ) );
-
-		if ( media_type->majortype!=MEDIATYPE_Video ) continue;
-
-		unsigned char bitDepth;
-		if		( media_type->subtype == MEDIASUBTYPE_RGB1 ) { bitDepth = 1; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB4 ) { bitDepth = 4; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB8 ) { bitDepth = 8; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB555 ) { bitDepth = 15; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB565 ) { bitDepth = 16; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB24 ) { bitDepth = 24; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB32 ) { bitDepth = 32; }
-		else { bitDepth = 0; }
-
-		tcout << (i+1) << _T( ") Width: " ) << caps.InputSize.cx << 
-			_T( "\tHeight:" ) << caps.InputSize.cy <<
-			_T( "\tBit Depth:" ) << bitDepth <<
-			std::endl;
-
-		DeleteMediaType(media_type);
-	}
-
-	streamConfig->Release();
-}
-
 Gdiplus::Bitmap *CaptureDevice::GetSingleSnapshot( DWORD wait /* = 0 */ ) {
 	using namespace Gdiplus;
 
@@ -235,7 +218,7 @@ Gdiplus::Bitmap *CaptureDevice::GetSingleSnapshot( DWORD wait /* = 0 */ ) {
 
 		ZeroMemory( &am, sizeof( AM_MEDIA_TYPE ) );
 		am.majortype = sourceAM->majortype;
-		am.subtype = sourceAM->subtype;
+		am.subtype = MEDIASUBTYPE_RGB24;
 
 		hr = sampleGrabber->SetMediaType( &am );
 
@@ -304,22 +287,16 @@ Gdiplus::Bitmap *CaptureDevice::SerializeFrame( ISampleGrabber *sampleGrabber ) 
 		throw Exception::NoSuchDevice();
 	}
 
-	PixelFormat bitDepth;
-	if		( connectedMediaType.subtype == MEDIASUBTYPE_RGB1 ) { bitDepth = PixelFormat1bppIndexed; }
-	else if	( connectedMediaType.subtype == MEDIASUBTYPE_RGB4 ) { bitDepth = PixelFormat4bppIndexed; }
-	else if	( connectedMediaType.subtype == MEDIASUBTYPE_RGB8 ) { bitDepth = PixelFormat8bppIndexed; }
-	else if	( connectedMediaType.subtype == MEDIASUBTYPE_RGB555 ) { bitDepth = PixelFormat16bppRGB555; }
-	else if	( connectedMediaType.subtype == MEDIASUBTYPE_RGB565 ) { bitDepth = PixelFormat16bppRGB565; }
-	else if	( connectedMediaType.subtype == MEDIASUBTYPE_RGB24 ) { bitDepth = PixelFormat24bppRGB; }
-	else if	( connectedMediaType.subtype == MEDIASUBTYPE_RGB32 ) { bitDepth = PixelFormat32bppRGB; }
-	else { throw Exception::NoSuchDevice(); }
+	if ( connectedMediaType.subtype != MEDIASUBTYPE_RGB24 ) {
+		throw Exception::NoSuchDevice();
+	}
 
 	Bitmap *target = new Bitmap( bitmapHeader->biWidth,
 		bitmapHeader->biHeight,
-		bitDepth );
+		PixelFormat24bppRGB );
 	Rect rect( 0, 0, bitmapHeader->biWidth, bitmapHeader->biHeight );
 	BitmapData bitmapData;
-	Status s = target->LockBits( &rect, ImageLockModeWrite, bitDepth, &bitmapData );
+	Status s = target->LockBits( &rect, ImageLockModeWrite, PixelFormat24bppRGB, &bitmapData );
 	memcpy( reinterpret_cast< void * >( bitmapData.Scan0 ), reinterpret_cast< const void * >( buffer ), bufferSize );
 	target->UnlockBits( &bitmapData );
 	target->RotateFlip( RotateNoneFlipY ); // stream comes in upside down?
@@ -342,10 +319,21 @@ Gdiplus::Bitmap *CaptureDevice::SerializeFrame( ISampleGrabber *sampleGrabber ) 
 	return target;
 }
 
+WORD GetBitDepthFromMediaSubType( GUID &subtype ) {
+	if		( subtype == MEDIASUBTYPE_RGB1 ) { return 1; }
+	else if	( subtype == MEDIASUBTYPE_RGB4 ) { return 4; }
+	else if	( subtype == MEDIASUBTYPE_RGB8 ) { return 8; }
+	else if	( subtype == MEDIASUBTYPE_RGB555 ) { return 15; }
+	else if	( subtype == MEDIASUBTYPE_RGB565 ) { return 16; }
+	else if	( subtype == MEDIASUBTYPE_RGB24 ) { return 24; }
+	else if	( subtype == MEDIASUBTYPE_RGB32 ) { return 32; }
+	else { return 24; } // the assumption is that the sub-type (typically in the YU family) can automatically be cast to 24-bit RGB
+}
+
 // attempts to find the output pin that matches the type of input the caller gave
 // if the method can't find any it throws an exception
 // on error, throw an exception
-void CaptureDevice::SetResolution( LONG width, LONG height, WORD bitDepth /* = 0 */ ) {
+void CaptureDevice::SetResolution( LONG desiredWidth, LONG desiredHeight ) {
 	using namespace std;
 
 	HRESULT hr;
@@ -356,11 +344,14 @@ void CaptureDevice::SetResolution( LONG width, LONG height, WORD bitDepth /* = 0
 	AM_MEDIA_TYPE *media_type;
 
 	AM_MEDIA_TYPE *closestMediaType = NULL;
-	WORD closestDeltaBitDepth = 0xff; // max value
 
-	// error checking
-	if ( width <= 0 || height <= 0 ) {
-		return; // error
+	LONG desiredResolution, bestResolutionDifference;
+
+	if ( desiredWidth == 0 && desiredHeight == 0 ) {
+		desiredResolution = std::numeric_limits<LONG>::max();
+	} else {
+		desiredResolution = desiredWidth * desiredHeight * 24;
+		assert( desiredResolution > 0 );
 	}
 
 	// enumerate all the caps, looking for a good match
@@ -369,31 +360,23 @@ void CaptureDevice::SetResolution( LONG width, LONG height, WORD bitDepth /* = 0
 		throw Exception::COMError( hr );
 	}
 	hr = streamConfig->GetNumberOfCapabilities( &capCount, &capSize );
+	if ( FAILED( hr ) ) {
+		throw Exception::COMError( hr );
+	}
 	for ( int i=0;i<capCount;i++ ) {
-
-		streamConfig->GetStreamCaps( i, &media_type, reinterpret_cast< BYTE * >( &caps ) );
+		hr = streamConfig->GetStreamCaps( i, &media_type, reinterpret_cast< BYTE * >( &caps ) );
+		if ( FAILED( hr ) ) {
+			throw Exception::COMError( hr );
+		}
 
 		if ( media_type->majortype!=MEDIATYPE_Video ) continue;
 
-// only uncompressed RGB is suitable input right now
-		unsigned char bD;
-		if		( media_type->subtype == MEDIASUBTYPE_RGB1 ) { bD = 1; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB4 ) { bD = 4; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB8 ) { bD = 8; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB555 ) { bD = 15; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB565 ) { bD = 16; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB24 ) { bD = 24; }
-		else if	( media_type->subtype == MEDIASUBTYPE_RGB32 ) { bD = 32; }
-		else { continue; }
-
-		WORD deltaBitDepth = abs( bD - bitDepth );
-		bool use = false;
-		if ( caps.InputSize.cx == width && caps.InputSize.cy == height ) {
-			if ( closestMediaType == NULL || ( deltaBitDepth < closestDeltaBitDepth && bitDepth!=0 ) ) {
-				closestDeltaBitDepth = deltaBitDepth;
-				closestMediaType = media_type;
-				use = true;
-			}
+		LONG diff = abs( caps.InputSize.cx * caps.InputSize.cy * GetBitDepthFromMediaSubType( media_type->subtype ) - desiredResolution );
+		if ( closestMediaType == NULL || diff < bestResolutionDifference ) {
+			bestResolutionDifference = diff;
+			closestMediaType = media_type;
+		} else {
+			DeleteMediaType( media_type );
 		}
 	}
 
@@ -403,6 +386,7 @@ void CaptureDevice::SetResolution( LONG width, LONG height, WORD bitDepth /* = 0
 		throw Exception::NoSuchDevice();
 	} else {
 		streamConfig->SetFormat( closestMediaType );
+		DeleteMediaType( closestMediaType );
 	}
 
 	streamConfig->Release();
@@ -542,7 +526,7 @@ CLSID CreateEncoderClsid( const tstring &path ) {
 	return pClsid;
 }
 
-void CaptureDevice::EnumerateCaptureDevices( std::map< tstring, IBaseFilter * > &filterMap ) {
+void CaptureDevice::EnumerateCaptureDevices( std::map< tstring, std::pair< IBaseFilter *, int > > &filterMap ) {
 	HRESULT result;
 
 	ICreateDevEnum *enumerator;
@@ -558,6 +542,8 @@ void CaptureDevice::EnumerateCaptureDevices( std::map< tstring, IBaseFilter * > 
 
 		throw Exception::COMError( result );
 	}
+
+	int counter = 0;
 
 	while ( enumMoniker->Next( 1, &moniker, &fetched )==S_OK ) {
 		IPropertyBag *bag;
@@ -576,7 +562,7 @@ void CaptureDevice::EnumerateCaptureDevices( std::map< tstring, IBaseFilter * > 
 		IBaseFilter *baseFilter;
 		result = moniker->BindToObject( 0, 0, IID_IBaseFilter, reinterpret_cast< LPVOID * >( &baseFilter ) );
 		
-		filterMap[tstring( friendlyName )] = baseFilter;
+		filterMap[tstring( friendlyName )] = std::make_pair(baseFilter, counter);
 		
 		::VariantClear( &variant );
 
@@ -584,92 +570,6 @@ void CaptureDevice::EnumerateCaptureDevices( std::map< tstring, IBaseFilter * > 
 	}
 	enumMoniker->Release();
 	enumerator->Release();
-}
-
-void parseCommandLine( tstring cmdLine, std::map<tstring, tstring> &collection ) {
-	const TCHAR PARAM_PREFIX = _T( '\\' );
-	const TCHAR PARAM_QUOTE = _T( '\"' );
-
-	bool inQuotes = false;
-	bool haveSlash = false;
-
-	cmdLine.push_back( _T( ' ' ) );
-	tstring *newToken = new tstring();
-	for ( tstring::iterator i = cmdLine.begin(); i!=cmdLine.end(); i++ ) {
-		switch ( *i ) {
-			case _T( ' ' ):
-				// the only real delimiter
-
-				if ( !inQuotes ) {
-					tstring::size_type colonPos = newToken->find( _T( ':' ) );
-					if ( colonPos != tstring::npos ) {
-						tstring partA = newToken->substr( 0, colonPos );
-						tstring partB = newToken->substr( colonPos + 1 );
-						if ( partB[0] == PARAM_QUOTE && partB[partB.length()-1] == PARAM_QUOTE ) {
-							partB = partB.substr( 1, partB.length() - 2 );
-						}
-
-						collection[partA] = partB;
-					} else {
-						collection[*newToken] = tstring();
-					}
-					delete newToken;
-					newToken = new tstring();
-				} else {
-					newToken->push_back( *i );
-				}
-				break;
-			case PARAM_PREFIX:
-				// \'s are special because they can negate the quotes
-
-				if ( haveSlash ) {
-					newToken->push_back( *i );
-					haveSlash = false;
-					break;
-				} else {
-					haveSlash = true;
-				}
-
-				break;
-			case PARAM_QUOTE:
-				// quotes are special cuz they can negate the space
-				if ( haveSlash ) {
-					haveSlash = false;
-				} else {
-					inQuotes = !inQuotes;
-				}
-				newToken->push_back( *i );
-
-				break;
-			default:
-				if ( haveSlash ) {
-					newToken->push_back( PARAM_PREFIX );
-					haveSlash = false;
-				}
-
-				newToken->push_back( *i );
-
-				break;
-		}
-	}
-}
-
-void tokenize(const tstring& str, std::vector<tstring>& tokens, const tstring& delimiters = _T( " " ) )
-{
-    // Skip delimiters at beginning.
-    tstring::size_type lastPos = str.find_first_not_of(delimiters, 0);
-    // Find first "non-delimiter".
-    tstring::size_type pos     = str.find_first_of(delimiters, lastPos);
-
-    while (tstring::npos != pos || tstring::npos != lastPos)
-    {
-        // Found a token, add it to the vector.
-        tokens.push_back(str.substr(lastPos, pos - lastPos));
-        // Skip delimiters.  Note the "not_of"
-        lastPos = str.find_first_not_of(delimiters, pos);
-        // Find next "non-delimiter"
-        pos = str.find_first_of(delimiters, lastPos);
-    }
 }
 
 void ShowHeader() {
@@ -681,14 +581,14 @@ void ShowHeader() {
 	::VerQueryValue( pBlock, lpSubBlock, lplpBuffer, puLen );
 */
 
-	tcout << _T( "DSGrab Version 1.0.0 By Sahab Yazdani" ) << endl;
+	tcout << _T( "DSGrab Version 1.5.0 By Sahab Yazdani" ) << endl;
 	tcout << _T( "http://www.saliences.com/projects/dsgrab/index.html" ) << endl << endl;
 }
 
 class COMToken {
 public:
 	COMToken() {
-		HRESULT hr = ::CoInitialize( NULL);
+		HRESULT hr = ::CoInitialize( NULL );
 		if ( FAILED( hr ) ) {
 			throw Exception::COMError( hr );
 		}
@@ -698,52 +598,255 @@ public:
 	}
 };
 
-void ShowUsageInformation() {
-	using namespace std;
+class GdiPlusToken {
+public:
+	GdiPlusToken(ULONG token);
+	~GdiPlusToken();
+private:
+	ULONG gdiplusToken;
+};
 
-	tcout << _T( "[/list]:                Lists all available Capture Devices on the system" ) << endl;
-	tcout << _T( "[/use:\"DEVICE NAME\"]:   Uses the Capture Device with name \"DEVICE NAME\" for" ) << endl;
-	tcout << _T( "                        Capture" ) << endl;
-	tcout << _T( "[/caps]:                Lists the output formats supported by the Capture" ) << endl;
-	tcout << _T( "                        Device specified with /use" ) << endl;
-	tcout << _T( "[/dim:WxHxBPP]:         Sets the capture format to one supported by the Capture" ) << endl;
-	tcout << _T( "                        Device." ) << endl;
-	tcout << _T( "[/resize:WxHxBPP]:      Resizes the captured frame to an image of size W by H" ) << endl;
-	tcout << _T( "                        with BPP bits of colour." ) << endl;
-	tcout << _T( "[/output:FILENAME]:     Sets the location where the resulting captured image" ) << endl;
-	tcout << _T( "                        will be saved." ) << endl;
-	tcout << _T( "[/wait:TIME]:           Specifies how long to wait before capturing the image" ) << endl;
-	tcout << _T( "                        (in milliseconds)" ) << endl;
-	tcout << _T( "[/silent]:              Supresses all output." ) << endl;
-	tcout << _T( "[/help]:                Display this help screen." ) << endl;
-	tcout << endl;
+GdiPlusToken::GdiPlusToken(ULONG token) : gdiplusToken(token) {
+}
+
+GdiPlusToken::~GdiPlusToken() {
+	Gdiplus::GdiplusShutdown(gdiplusToken);
+}
+
+std::auto_ptr<GdiPlusToken> InitializeGdiPlus() {
+	using namespace Gdiplus;
+	using std::exception;
+	using std::auto_ptr;
+
+	ULONG gdiplusToken;
+	GdiplusStartupInput gdiplusStartup;
+	
+	Status s = GdiplusStartup( &gdiplusToken, &gdiplusStartup, NULL );
+
+	if ( s!=Ok ) {
+		throw exception();
+	}
+
+	auto_ptr<GdiPlusToken> token( new GdiPlusToken(gdiplusToken) );
+	return token;
+}
+
+struct GrabParameters {
+	tstring outputFile;
+
+	bool manualDevice;
+	tstring device;
+
+	long width;
+	long height;
+
+	int wait;
+
+	bool silent;
+
+	bool listDevices;
+};
+
+void ShowUsageSamples() {
+	using std::endl;
+
 	tcout << _T( "Examples:" ) << endl;
 	tcout << endl;
 	tcout << _T( "List the Capture Devices on the system." ) << endl;
-	tcout << _T( "\tDSGrab /list" ) << endl;
+	tcout << _T( "\tDSGrab --list" ) << endl;
 	tcout << endl;
-	tcout << _T( "List the Capture Formats supported by the device \"ATI AVStream Analog Capture\"" ) << endl;
-	tcout << _T( "\tDSGrab /use:\"ATI AVStream Analog Capture\" /caps" ) << endl;
+	tcout << _T( "Capture a frame with the maximum native resolution from the default capture device" ) << endl;
+	tcout << _T( "\tDSGrab capture.jpg" ) << endl;
 	tcout << endl;
-	tcout << _T( "Capture a frame of size 320 by 240 with 24 bits of colour from the device" ) << endl;
-	tcout << _T( "ATI AVStream Analog Capture\" to the file \"capture.jpg\"" ) << endl;
-	tcout << _T( "\tDSGrab /use:\"ATI AVStream Analog Capture\" /dim:320x240x24 /output:capture.jpg" ) << endl;
+	tcout << _T( "Capture a frame of size 320 by 240 from the default capture device" ) << endl;
+	tcout << _T( "\tDSGrab -r 320x240 capture.jpg" ) << endl;
+	tcout << endl;
+}
+
+std::auto_ptr<GrabParameters> ParseArguments( int argc, TCHAR *argv[] ) {
+	using namespace boost::program_options;
+
+	using boost::split;
+	using boost::is_any_of;
+	using boost::lexical_cast;
+
+	using std::auto_ptr;
+	using std::string;
+	using std::cout;
+	using std::cerr;
+	using std::endl;
+	using std::exception;
+	using std::vector;
+
+	options_description requiredOpts( "Required Options" );
+	requiredOpts.add_options()
+		( "output-file,O", tvalue< tstring >()->required(), "Name of output file" );
+
+	options_description helpOpts( "Help Options" );
+	helpOpts.add_options()( "help", "Help!" );
+
+	options_description listOpts( "List Options" );
+	listOpts.add_options()( "list", "List all compatible capture devices" );
+
+	options_description basicOpts( "Basic Options" );
+	basicOpts.add_options()
+		( "device,d", tvalue< tstring >(), "The capture device to use. By default, the first avaiable capture device is used." )
+		( "resolution,r", tvalue< tstring >()->default_value( _T( "0x0" ), "" ), "The desired output resolution. The program will automatically choose the closest matching resolution from the device." );
+
+	options_description advancedOpts( "Advanced Options" );
+	advancedOpts.add_options()
+		( "wait,w", tvalue< int >()->default_value( 0, "" ), "Determines the wait period before taking a snapshot." )
+		( "silent,s", "Supresses all output" );
+
+	positional_options_description positional;
+	positional.add( "output-file", 1 );
+
+	options_description all( "All Options" );
+	all
+		.add( requiredOpts )
+		.add( basicOpts )
+		.add( advancedOpts );
+
+	// parse the parameters
+	try {
+		variables_map help_variables;
+		store( tcommand_line_parser( argc, argv ).options( helpOpts ).allow_unregistered().run(), help_variables );
+		notify( help_variables );
+
+		if ( help_variables.count( "help" ) > 0 ) {
+			ShowUsageSamples();
+			cout << listOpts << endl;
+			cout << requiredOpts << endl;
+			cout << basicOpts << endl;
+			cout << advancedOpts << endl;
+
+			return auto_ptr<GrabParameters>( NULL );
+		}
+
+		variables_map list_variables;
+		store( tcommand_line_parser( argc, argv ).options( listOpts ).allow_unregistered().run(), list_variables );
+		notify( list_variables );
+
+		if (list_variables.count( "list" ) > 0 ) {
+			auto_ptr<GrabParameters> p( new GrabParameters() );
+			p->listDevices = true;
+			return p;
+		}
+
+		variables_map vm;
+		store( tcommand_line_parser( argc, argv ).options( all ).positional( positional ).run(), vm );
+		notify( vm );
+
+		auto_ptr<GrabParameters> params( new GrabParameters() );
+
+		params->outputFile = vm["output-file"].as<tstring>();
+
+		if (vm.count("device")!=0) {
+			params->manualDevice = true;
+			params->device = vm["device"].as<tstring>();
+		} else {
+			params->manualDevice = false;
+		}
+
+		vector<tstring> tokens;
+		split(tokens, vm["resolution"].as<tstring>(), is_any_of(_T("xX")));
+		if ( tokens.size() != 2 ) {
+			throw Exception::CommandLineError( _T( "\"resolution\" argument is malformed" ) );
+		}
+		try {
+			params->width = lexical_cast<long>( tokens[0] );
+			params->height = lexical_cast<long>( tokens[1] );
+		} catch ( boost::bad_lexical_cast ) {
+			throw Exception::CommandLineError( _T( "\"resolution\" argument is malformed" ) );
+		}
+
+		params->wait = vm["wait"].as<int>();
+
+		params->silent = vm.count("silent") > 0;
+		params->listDevices = false;
+
+		return params;
+	} catch ( exception e ) {
+		tcerr << e.what() << endl;
+		tcout << endl;
+		ShowUsageSamples();
+		tcout << endl;
+		tcout << "For more information invoke help via \"dsgrab --help\"." << endl;
+
+		throw exception();
+	}
+}
+
+std::auto_ptr<Gdiplus::Bitmap> ResizeBitmap( std::auto_ptr<Gdiplus::Bitmap> &bitmap, LONG desiredWidth, LONG desiredHeight ) {
+	using namespace Gdiplus;
+	using std::exception;
+
+	std::auto_ptr<Bitmap> backSurface( new Bitmap( desiredWidth, desiredHeight, PixelFormat24bppRGB ) );
+	Status s = backSurface->SetResolution( bitmap->GetHorizontalResolution(), bitmap->GetVerticalResolution() );
+	if ( s!=Ok ) {
+		throw Exception::ResizeError( _T( "Error setting output resolution." ) );
+	}
+
+	Graphics transformer( backSurface.get() );
+	s = transformer.SetInterpolationMode( InterpolationModeHighQualityBicubic );
+	if ( s!=Ok ) {
+		throw Exception::ResizeError( _T( "Error setting Interpolation Mode." ) );
+	}
+	s = transformer.DrawImage( bitmap.get(), 
+		Rect( 0, 0, desiredWidth, desiredHeight ),
+		0, 0, bitmap->GetWidth(), bitmap->GetHeight(),
+		UnitPixel,
+		NULL, NULL, NULL );
+	if ( s!=Ok ) {
+		throw Exception::ResizeError( _T( "Error resizing output image." ) );
+	}
+
+	return backSurface;
+}
+
+void SaveBitmap(std::auto_ptr<Gdiplus::Bitmap> &bitmap, tstring outputFile ) {
+	using namespace Gdiplus;
+	using std::exception;
+
+	CLSID clsidEncoder = CreateEncoderClsid( outputFile );
+	Status s = bitmap->Save( outputFile.c_str(), &clsidEncoder, NULL );
+
+	if (s != Ok ) {
+		throw Exception::SaveError();
+	}
 }
 
 int _tmain( int argc, TCHAR *argv[] ) {
 	using namespace Gdiplus;
-
-	GdiplusStartupInput gdiplusStartup;
+	using std::auto_ptr;
+	using std::exception;
 
 	try {
 		COMToken comToken;
 
-		Status s = GdiplusStartup( &gdiplusToken, &gdiplusStartup, NULL );
+		auto_ptr<GrabParameters> parameters;
+		auto_ptr<GdiPlusToken> gdiplusToken;
+	
+		try {
+			parameters = ParseArguments( argc, argv );
+			if (parameters.get() == NULL) {
+				return 0;
+			}
+		} catch ( Exception::CommandLineError e ) {
+			tcerr << e.error << std::endl;
+			return -1;
+		} catch ( ... ) {
+			return -1;
+		} 
 
-		std::map<tstring, tstring> cmdLineArgs;
-		parseCommandLine( tstring( ::GetCommandLine() ), cmdLineArgs );
+		try {
+			gdiplusToken = InitializeGdiPlus();
+		} catch (exception e) {
+			tcerr << _T( "Error initializing Gdi Plus" ) << std::endl;
+			return -1;
+		}
 
-		std::map< tstring, IBaseFilter * > deviceMap;
+		std::map< tstring, std::pair< IBaseFilter *, int > > deviceMap;
 		try {
 			CaptureDevice::EnumerateCaptureDevices( deviceMap );
 		} catch ( Exception::COMError ) {
@@ -751,178 +854,63 @@ int _tmain( int argc, TCHAR *argv[] ) {
 			return -1;
 		}
 
-		if ( cmdLineArgs.find( _T( "/silent" ) )==cmdLineArgs.end() ) {
+		if ( !parameters->silent ) {
 			ShowHeader();
 		}
 
-		if ( cmdLineArgs.find( _T( "/help" ) )!=cmdLineArgs.end() ) {
-			ShowUsageInformation();
-
-			return 0;
-		}
-
-		if ( cmdLineArgs.find( _T( "/list" ) )!=cmdLineArgs.end() ) {
+		if ( parameters->listDevices ) {
 			tcout << "Available Capture Devices:" << std::endl;
 			
 			int counter = 1; 
-			for ( std::map< tstring, IBaseFilter * >::iterator i = deviceMap.begin(); i!=deviceMap.end(); i++, counter++ ) {
+			for ( std::map< tstring, std::pair< IBaseFilter *, int > >::iterator i = deviceMap.begin(); i!=deviceMap.end(); i++, counter++ ) {
 				tcout << counter << _T( ") " ) << i->first << std::endl;
 			}
 
 			return 0;
 		}
 
-		if ( cmdLineArgs.find( _T( "/use" ) )!=cmdLineArgs.end() ) { 
-			try {
-				CaptureDevice device( deviceMap[cmdLineArgs[_T("/use")]] );
-
-				if ( cmdLineArgs.find( _T( "/caps" ) )!=cmdLineArgs.end() ) {
-					tcout << "List of Available Output formats for device \"" << cmdLineArgs[_T("/use")] << "\":" << std::endl;
-					device.EnumerateDeviceCaps();
-
-					return 0;
-				}
-
-				if ( cmdLineArgs.find( _T( "/dim" ) )!=cmdLineArgs.end() ) {
-					std::vector<tstring> tokens;
-					tokenize( cmdLineArgs[_T( "/dim" )], tokens, _T( "x" ) );
-					if ( tokens.size() < 2 ) {
-						tcerr << _T( "Not enough parameters for argument //dims." ) << std::endl;
-
-						return -1;
-					}
-
-					try {
-						LONG width = boost::lexical_cast<LONG>( tokens[0] );
-						LONG height = boost::lexical_cast<LONG>( tokens[1] );
-
-						try {
-							if ( tokens.size() == 3 ) {							
-								device.SetResolution( width, height, (WORD)( boost::lexical_cast<LONG>( tokens[2] ) ) );
-							} else {
-								device.SetResolution( width, height );
-							}
-						} catch ( Exception::NoSuchDevice ) {
-							tcerr << _T( "The capture device doesn't support the selected image dimensions. Please use the \\caps parameter to see the support output resolutions." ) << std::endl;
-						} catch ( Exception::COMError ) {
-							// TODO: Error Recover
-						}
-					} catch ( boost::bad_lexical_cast ) {
-						tcerr << _T( "The //dim parameter has not been formatted correctly." ) << std::endl;
-						return -1;
+		try {
+			std::auto_ptr<CaptureDevice> device;
+			if ( parameters->manualDevice ) {
+				device = std::auto_ptr<CaptureDevice>( new CaptureDevice( deviceMap[parameters->device].first ) );
+			} else {
+				for ( std::map< tstring, std::pair< IBaseFilter *, int > >::iterator i = deviceMap.begin(); i!=deviceMap.end(); i++ ) {
+					if (i->second.second==0) {
+						device = std::auto_ptr<CaptureDevice>( new CaptureDevice( i->second.first ) );
+						break;
 					}
 				}
-
-				if ( cmdLineArgs.find( _T( "/output" ) )!=cmdLineArgs.end() ) {
-					// output something to a bitmap
-					DWORD wait = 0;
-					if ( cmdLineArgs.find( _T( "/wait" ) )!=cmdLineArgs.end() ) {
-						try {
-							wait = boost::lexical_cast<DWORD>( cmdLineArgs[_T("/wait")]  );
-						} catch ( boost::bad_lexical_cast ) {
-							tcerr << _T( "The //wait parameter has not been formatted correctly." ) << std::endl;
-							return -1;
-						}
-					}
-					std::auto_ptr<Bitmap> bitmap( device.GetSingleSnapshot( wait ) );
-
-					try {
-						CLSID clsidEncoder = CreateEncoderClsid( cmdLineArgs[_T("/output")] );
-
-						if ( cmdLineArgs.find( _T( "/resize" ) )!=cmdLineArgs.end() ) {
-							std::vector<tstring> tokens;
-							tokenize( cmdLineArgs[_T( "/resize" )], tokens, _T( "x" ) );
-							if ( tokens.size() < 2 ) {
-								tcerr << _T( "Not enough parameters for argument //resize." ) << std::endl;
-
-								return -1;
-							}
-
-							LONG width = boost::lexical_cast<LONG>( tokens[0] );
-							LONG height = boost::lexical_cast<LONG>( tokens[1] );
-							PixelFormat bitDepth;
-
-							if ( tokens.size() == 3 ) {
-								WORD bD = boost::lexical_cast<WORD>( tokens[2] );
-
-								switch ( bD ) {
-									case 1:
-										bitDepth = PixelFormat1bppIndexed;
-										break;
-									case 4:
-										bitDepth = PixelFormat4bppIndexed;
-										break;
-									case 8:
-										bitDepth = PixelFormat8bppIndexed;
-										break;
-									case 16:
-										bitDepth = PixelFormat16bppRGB565;
-										break;
-									case 24:
-										bitDepth = PixelFormat24bppRGB;
-										break;
-									case 32:
-										bitDepth = PixelFormat32bppARGB;
-									default:
-										tcerr << _T( "Unsupported Bit Depth, defaulting to 32 bits." ) << std::endl;
-										return -1;
-								}
-							} else {
-								bitDepth = bitmap->GetPixelFormat();
-							}
-
-							std::auto_ptr<Bitmap> backSurface( new Bitmap( width, height, bitDepth ) );
-							s = backSurface->SetResolution( bitmap->GetHorizontalResolution(), bitmap->GetVerticalResolution() );
-							if ( s!=Ok ) {
-								tcerr << _T( "Error setting output resolution." ) << std::endl;
-								return -1;
-							}
-
-							Graphics transformer( backSurface.get() );
-							s = transformer.SetInterpolationMode( InterpolationModeHighQualityBicubic );
-							if ( s!=Ok ) {
-								tcerr << _T( "Error setting Interpolation Mode." ) << std::endl;
-								return -1;
-							}
-							s = transformer.DrawImage( bitmap.get(), 
-								Rect( 0, 0, width, height ),
-								0, 0, bitmap->GetWidth(), bitmap->GetHeight(),
-								UnitPixel,
-								NULL, NULL, NULL );
-							if ( s!=Ok ) {
-								tcerr << _T( "Error resizing output image." ) << std::endl;
-								return -1;
-							}
-
-							s = backSurface->Save( cmdLineArgs[_T("/output")].c_str(), &clsidEncoder, NULL );
-						} else {
-							s = bitmap->Save( cmdLineArgs[_T("/output")].c_str(), &clsidEncoder, NULL );
-						}
-
-						if ( s!=Ok ) {
-							tcerr << _T( "Error saving output image." ) << std::endl;
-							return -1;
-						}
-					} catch ( Exception::NoSuchCLSID ) {
-						tcerr << _T( "Cannot convert to the image format specified." ) << std::endl;
-						return -1;
-					} catch ( Exception::BadExtension e ) {
-						tcerr << _T( "The extension " ) << e.extension << _T( " is not support by DSGrab." ) << std::endl;
-						return -1;
-					} catch ( boost::bad_lexical_cast ) {
-						tcerr << _T( "The //resize parameter has not been formatted correctly." ) << std::endl;
-						return -1;
-					}
-				}
-			} catch ( Exception::NoSuchDevice ) {
-				tcerr << _T( "No Capture Device with the name \"" ) << cmdLineArgs[_T("/use")] << _T( "\" exists. Use the /list argument to find the list of capture devices on your computer." ) << std::endl;
-
-				return -1;
-			} catch ( Exception::COMError ) {
-				tcerr << _T( "COM Error initializing Capture Device." ) << std::endl;
-
-				return -1;
 			}
+
+			device->SetResolution(parameters->width, parameters->height);
+			std::auto_ptr<Bitmap> bitmap( device->GetSingleSnapshot( parameters->wait ) );
+
+			if ( ( parameters->width == 0 && parameters->height == 0 ) || // if no desired size was given
+				( bitmap->GetWidth() == parameters->width && bitmap->GetHeight() == parameters->height ) ) // if the sizes match
+			{
+				SaveBitmap( bitmap, parameters->outputFile );
+			} else {
+				std::auto_ptr<Bitmap> resizedBitmap = ResizeBitmap( bitmap, parameters->width, parameters->height );
+				SaveBitmap( resizedBitmap, parameters->outputFile );
+			}
+		} catch ( Exception::ResizeError e ) {
+			tcerr << _T( "The following error occurred resizing the image: \"" ) << e.error << _T( "\"" ) << std::endl;
+			return -1;
+		} catch ( Exception::SaveError ) {
+			tcerr << _T( "Error saving output image." ) << std::endl;
+			return -1;
+		} catch ( Exception::NoSuchCLSID ) {
+			tcerr << _T( "Cannot convert to the image format specified." ) << std::endl;
+			return -1;
+		} catch ( Exception::BadExtension e ) {
+			tcerr << _T( "The extension " ) << e.extension << _T( " is not support by DSGrab." ) << std::endl;
+			return -1;
+		} catch ( Exception::NoSuchDevice ) {
+			tcerr << _T( "No Capture Device with the name \"" ) << parameters->device << _T( "\" exists. Use the --list argument to list the compatible capture devices on your computer." ) << std::endl;
+			return -1;
+		} catch ( Exception::COMError ) {
+			tcerr << _T( "COM Error initializing Capture Device." ) << std::endl;
+			return -1;
 		}
 	} catch ( Exception::COMError ) {
 		return -1;
