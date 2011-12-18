@@ -43,7 +43,7 @@ $REMOTE_NAME    = "<remote server>";
 $PATH_TO_WINSCP = "C:\Program Files\winscp3\winscp3.com";
 # Do the Capture
 $command = <<< EOT
-start /b {$PATH_TODSGRAB} /silent /use:"{$CAPTUREDEVICE}" /dim:{$IMAGEWIDTH}x{$IMAGEHEIGHT}x24 /wait:3000 /output:{$PATH_TO_OUTPUT}.png
+start /b {$PATH_TODSGRAB} -s -d "{$CAPTUREDEVICE}" -r {$IMAGEWIDTH}x{$IMAGEHEIGHT} -w 3000 {$PATH_TO_OUTPUT}.png
 EOT;
 $output = array();
 $returnValue = 0;
