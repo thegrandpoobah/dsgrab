@@ -903,7 +903,7 @@ int _tmain( int argc, TCHAR *argv[] ) {
 			tcerr << _T( "Cannot convert to the image format specified." ) << std::endl;
 			return -1;
 		} catch ( Exception::BadExtension e ) {
-			tcerr << _T( "The extension " ) << e.extension << _T( " is not support by DSGrab." ) << std::endl;
+			tcerr << _T( "The extension " ) << e.extension << _T( " is not supported by DSGrab." ) << std::endl;
 			return -1;
 		} catch ( Exception::NoSuchDevice ) {
 			tcerr << _T( "No Capture Device with the name \"" ) << parameters->device << _T( "\" exists. Use the --list argument to list the compatible capture devices on your computer." ) << std::endl;
