@@ -501,25 +501,25 @@ CLSID CreateEncoderClsid( const tstring &path ) {
 	CLSID pClsid;
 	tstring extension = path.substr( path.find_last_of( _T( '.' ) ) + 1 );
 
-	if ( extension == _T( "" ) ) {
+	if ( extension.empty() ) {
 		throw Exception::BadExtension( extension );
 	}
 
 	try {
-		if ( extension == _T( "bmp" ) ) {
+		if ( boost::iequals(extension, tstring(_T("bmp")))) {
 			pClsid = GetEncoderClsid( L"image/bmp" );
-		} else if ( extension == _T( "jpg" ) ) {
+		} else if (boost::iequals(extension, tstring(_T("jpg")))) {
 			pClsid = GetEncoderClsid( L"image/jpeg" );
-		} else if ( extension == _T( "png" ) ) {
+		} else if (boost::iequals(extension, tstring(_T("png")))) {
 			pClsid = GetEncoderClsid( L"image/png" );
-		} else if ( extension == _T( "tif" ) ) {
+		} else if (boost::iequals(extension, tstring(_T("tif")))) {
 			pClsid = GetEncoderClsid( L"image/tiff" );
-		} else if ( extension == _T( "gif" ) ) {
+		} else if (boost::iequals(extension, tstring(_T("gif")))) {
 			pClsid = GetEncoderClsid( L"image/gif" ) ;
 		} else {
 			throw Exception::BadExtension( extension );
 		}
-	} catch ( ... ) {
+	} catch (...) {
 		throw;
 	}
 
