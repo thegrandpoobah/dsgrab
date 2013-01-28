@@ -1,4 +1,4 @@
-// DSGrab Version 1.5.0
+// DSGrab Version 1.6.0
 
 //The MIT License
 //
@@ -579,7 +579,7 @@ void ShowHeader() {
 	::VerQueryValue( pBlock, lpSubBlock, lplpBuffer, puLen );
 */
 
-	tcout << _T( "DSGrab Version 1.5.0 By Sahab Yazdani" ) << endl;
+	tcout << _T( "DSGrab Version 1.6.0 By Sahab Yazdani" ) << endl;
 	tcout << _T( "http://www.saliences.com/projects/dsgrab/index.html" ) << endl << endl;
 }
 
