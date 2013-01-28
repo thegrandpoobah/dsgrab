@@ -632,8 +632,11 @@ std::auto_ptr<GdiPlusToken> InitializeGdiPlus() {
 struct GrabParameters {
 	tstring outputFile;
 
-	bool manualDevice;
-	tstring device;
+	bool manualDeviceByName;
+	tstring deviceName;
+
+	bool manualDeviceByNumber;
+	int deviceNumber;
 
 	long width;
 	long height;
@@ -688,7 +691,8 @@ std::auto_ptr<GrabParameters> ParseArguments( int argc, TCHAR *argv[] ) {
 
 	options_description basicOpts( "Basic Options" );
 	basicOpts.add_options()
-		( "device,d", tvalue< tstring >(), "The capture device to use. By default, the first avaiable capture device is used." )
+		( "device,d", tvalue< tstring >(), "The capture device to use (by name). By default, the first avaiable capture device is used." )
+		( "devicenumber,n", tvalue< int >(), "The capture device to use (by number). By default, the first available capture device is used." )
 		( "resolution,r", tvalue< tstring >()->default_value( _T( "0x0" ), "" ), "The desired output resolution. The program will automatically choose the closest matching resolution from the device." );
 
 	options_description advancedOpts( "Advanced Options" );
@@ -739,11 +743,14 @@ std::auto_ptr<GrabParameters> ParseArguments( int argc, TCHAR *argv[] ) {
 
 		params->outputFile = vm["output-file"].as<tstring>();
 
-		if (vm.count("device")!=0) {
-			params->manualDevice = true;
-			params->device = vm["device"].as<tstring>();
-		} else {
-			params->manualDevice = false;
+		params->manualDeviceByName = false;
+		params->manualDeviceByNumber = false;
+		if (vm.count("device") != 0) {
+			params->manualDeviceByName = true;
+			params->deviceName = vm["device"].as<tstring>();
+		} else if (vm.count("devicenumber") != 0) {
+			params->manualDeviceByNumber = true;
+			params->deviceNumber = vm["devicenumber"].as<int>();
 		}
 
 		vector<tstring> tokens;
@@ -871,10 +878,10 @@ int _tmain( int argc, TCHAR *argv[] ) {
 
 		try {
 			auto_ptr<CaptureDevice> device;
-			if ( parameters->manualDevice ) {
+			if ( parameters->manualDeviceByName ) {
 				bool found = false;
 				for ( vector< pair< tstring, IBaseFilter * > >::iterator iter = deviceList.begin(); iter != deviceList.end(); iter++ ) {
-					if ( boost::iequals( iter->first, parameters->device ) ) {
+					if ( boost::iequals( iter->first, parameters->deviceName ) ) {
 						device = auto_ptr<CaptureDevice>( new CaptureDevice( iter->second ) );
 						found = true;
 						break;
@@ -884,6 +891,12 @@ int _tmain( int argc, TCHAR *argv[] ) {
 				if (!found) {
 					throw Exception::NoSuchDevice();
 				}
+			} else if ( parameters->manualDeviceByNumber ) {
+				if ( parameters->deviceNumber <= 0 || parameters->deviceNumber > deviceList.size() ) {
+					throw Exception::NoSuchDevice();
+				}
+
+				device = auto_ptr<CaptureDevice>( new CaptureDevice( deviceList[parameters->deviceNumber-1].second ) );
 			} else {
 				device = auto_ptr<CaptureDevice>( new CaptureDevice( deviceList[0].second ) );
 			}
@@ -912,7 +925,12 @@ int _tmain( int argc, TCHAR *argv[] ) {
 			tcerr << _T( "The extension " ) << e.extension << _T( " is not supported by DSGrab." ) << std::endl;
 			return -1;
 		} catch ( Exception::NoSuchDevice ) {
-			tcerr << _T( "No Capture Device with the name \"" ) << parameters->device << _T( "\" exists. Use the --list argument to list the compatible capture devices on your computer." ) << std::endl;
+			if ( parameters->manualDeviceByName ) {
+				tcerr << _T( "No Capture Device with the name \"" ) << parameters->deviceName << _T( "\" exists. Use the --list argument to list the compatible capture devices on your computer." ) << std::endl;
+			} else if ( parameters->manualDeviceByNumber ) {
+				tcerr << _T( "Capture Device with index " ) << parameters->deviceNumber << _T( " is out of range. Use the --list argument to list the compatible capture devices on your computer." ) << std::endl;
+			}
+
 			return -1;
 		} catch ( Exception::COMError ) {
 			tcerr << _T( "COM Error initializing Capture Device." ) << std::endl;
