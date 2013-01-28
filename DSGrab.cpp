@@ -158,7 +158,7 @@ public:
 	CaptureDevice( IBaseFilter *f );
 	~CaptureDevice();
 
-	static void EnumerateCaptureDevices( std::map< tstring, std::pair< IBaseFilter *, int > > &filterMap );
+	static void EnumerateCaptureDevices( std::vector< std::pair< tstring, IBaseFilter * > > &deviceList );
 
 	void SetResolution( LONG width, LONG height );
 
@@ -526,7 +526,7 @@ CLSID CreateEncoderClsid( const tstring &path ) {
 	return pClsid;
 }
 
-void CaptureDevice::EnumerateCaptureDevices( std::map< tstring, std::pair< IBaseFilter *, int > > &filterMap ) {
+void CaptureDevice::EnumerateCaptureDevices( std::vector< std::pair< tstring, IBaseFilter * > > &deviceList ) {
 	HRESULT result;
 
 	ICreateDevEnum *enumerator;
@@ -542,8 +542,6 @@ void CaptureDevice::EnumerateCaptureDevices( std::map< tstring, std::pair< IBase
 
 		throw Exception::COMError( result );
 	}
-
-	int counter = 0;
 
 	while ( enumMoniker->Next( 1, &moniker, &fetched )==S_OK ) {
 		IPropertyBag *bag;
@@ -562,7 +560,7 @@ void CaptureDevice::EnumerateCaptureDevices( std::map< tstring, std::pair< IBase
 		IBaseFilter *baseFilter;
 		result = moniker->BindToObject( 0, 0, IID_IBaseFilter, reinterpret_cast< LPVOID * >( &baseFilter ) );
 		
-		filterMap[tstring( friendlyName )] = std::make_pair(baseFilter, counter);
+		deviceList.push_back( std::make_pair( tstring( friendlyName ), baseFilter ) );
 		
 		::VariantClear( &variant );
 
@@ -820,6 +818,8 @@ int _tmain( int argc, TCHAR *argv[] ) {
 	using namespace Gdiplus;
 	using std::auto_ptr;
 	using std::exception;
+	using std::vector;
+	using std::pair;
 
 	try {
 		COMToken comToken;
@@ -846,9 +846,9 @@ int _tmain( int argc, TCHAR *argv[] ) {
 			return -1;
 		}
 
-		std::map< tstring, std::pair< IBaseFilter *, int > > deviceMap;
+		vector< pair< tstring, IBaseFilter * > > deviceList;
 		try {
-			CaptureDevice::EnumerateCaptureDevices( deviceMap );
+			CaptureDevice::EnumerateCaptureDevices( deviceList );
 		} catch ( Exception::COMError ) {
 			tcerr << _T( "COM Error enumerating Capture Devices." ) << std::endl; 
 			return -1;
@@ -861,25 +861,31 @@ int _tmain( int argc, TCHAR *argv[] ) {
 		if ( parameters->listDevices ) {
 			tcout << "Available Capture Devices:" << std::endl;
 			
-			int counter = 1; 
-			for ( std::map< tstring, std::pair< IBaseFilter *, int > >::iterator i = deviceMap.begin(); i!=deviceMap.end(); i++, counter++ ) {
-				tcout << counter << _T( ") " ) << i->first << std::endl;
+			int counter = 1;
+			for ( vector< pair< tstring, IBaseFilter * > >::iterator iter = deviceList.begin(); iter != deviceList.end(); iter++, counter++ ) {
+				tcout << counter << _T( ") " ) << iter->first << std::endl;
 			}
 
 			return 0;
 		}
 
 		try {
-			std::auto_ptr<CaptureDevice> device;
+			auto_ptr<CaptureDevice> device;
 			if ( parameters->manualDevice ) {
-				device = std::auto_ptr<CaptureDevice>( new CaptureDevice( deviceMap[parameters->device].first ) );
-			} else {
-				for ( std::map< tstring, std::pair< IBaseFilter *, int > >::iterator i = deviceMap.begin(); i!=deviceMap.end(); i++ ) {
-					if (i->second.second==0) {
-						device = std::auto_ptr<CaptureDevice>( new CaptureDevice( i->second.first ) );
+				bool found = false;
+				for ( vector< pair< tstring, IBaseFilter * > >::iterator iter = deviceList.begin(); iter != deviceList.end(); iter++ ) {
+					if ( boost::iequals( iter->first, parameters->device ) ) {
+						device = auto_ptr<CaptureDevice>( new CaptureDevice( iter->second ) );
+						found = true;
 						break;
 					}
 				}
+
+				if (!found) {
+					throw Exception::NoSuchDevice();
+				}
+			} else {
+				device = auto_ptr<CaptureDevice>( new CaptureDevice( deviceList[0].second ) );
 			}
 
 			device->SetResolution(parameters->width, parameters->height);
